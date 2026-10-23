@@ -45,7 +45,8 @@ dependencies skip with a reason.
 ## Version and release
 
 Versions come from tags named `vX.Y.Z`. Each version is published to PyPI as a
-`pixtreme-infer` wheel; there is no source distribution, GitHub Release, or Release asset.
+`pixtreme-infer` wheel; there is no source distribution. Install it from PyPI. The GitHub
+Release of each version tag holds the same wheel and a `SHA256SUMS` file for verification.
 
 ## CUDA Graph components for module authors
 
