@@ -12,7 +12,7 @@ maintained and distributed separately as architecture distributions.
 
 ## Capabilities
 
-The base dependency is `pixtreme>=1.3.0`. Optional capabilities are separated by extra:
+The base dependency is `pixtreme>=2.0.0`. Optional capabilities are separated by extra:
 
 - `ort`: ONNX Runtime verification.
 - `verify`: device telemetry for the shared verification tools.
