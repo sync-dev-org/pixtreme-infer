@@ -1,8 +1,8 @@
 # pixtreme.infer
 
-This repository owns the pure-Python distribution `pixtreme-infer` and its import package
+This repository owns the distribution `pixtreme-infer` and its import package
 `pixtreme.infer`. It provides the architecture-independent Frame boundary, shared inference
-contracts, ONNX verification, recipe identity, and static dispatch used by architecture
+contracts, shared verification, recipe identity, and static dispatch used by architecture
 distributions.
 
 The wheel owns only the `pixtreme/infer/` subtree. The namespace root
@@ -12,9 +12,8 @@ maintained and distributed separately as architecture distributions.
 
 ## Capabilities
 
-The base dependency is `pixtreme>=2.0.0`. Optional capabilities are separated by extra:
+The base dependency is `pixtreme>=2.4.0`. Optional capabilities are separated by extra:
 
-- `ort`: ONNX Runtime verification.
 - `verify`: device telemetry for the shared verification tools.
 
 The core does not depend on TensorRT or torch. Architecture distributions build and run
@@ -27,9 +26,11 @@ implementations.
 
 ## Development
 
-Run development commands from the repository root:
+The standalone C++ SDK is in `cpp/`; the Python project and its environment are in
+`python/` and `python/.venv`. Run Python development commands from `python/`:
 
 ```console
+cd python
 uv sync --all-extras
 uv lock --check
 CUDA_VISIBLE_DEVICES='' uv run --no-sync python -m pytest -q
@@ -38,6 +39,31 @@ uv run --no-sync ruff check src tests
 uv run --no-sync ruff format --check src tests
 uv build --wheel
 ```
+
+The wheel includes the nanobind extension, C interface, header-only C++ wrapper and
+nanobind adapter, CMake package and shared
+library under `pixtreme/infer/`. Module builds find the CMake package with
+`pixtreme.infer.get_cmake_dir()` and link `pixtreme_infer::pixtreme_infer`. The SDK
+uses the shared library supplied by the installed `pixtreme` distribution. The wheel
+contains one shared library, `libpixtreme_infer.so.1`. Importing
+`pixtreme.infer` loads its extension and shared library without initializing CUDA.
+
+A native consumer declares the SDK dependency in its `CMakeLists.txt`:
+
+```cmake
+find_package(pixtreme_infer CONFIG REQUIRED)
+target_link_libraries(my_module PRIVATE pixtreme_infer::pixtreme_infer)
+```
+
+Configure the consumer from the Python environment containing the installed wheels:
+
+```console
+cmake -S . -B build -Dpixtreme_infer_DIR="$(python -c 'import pixtreme.infer; print(pixtreme.infer.get_cmake_dir())')"
+cmake --build build
+```
+
+The wheel's config finds pixtreme in the same environment. An explicit
+`-Dpixtreme_DIR=...` takes priority when selecting a different pixtreme SDK.
 
 The normal test suite does not require a GPU. Tests that require unavailable optional
 dependencies skip with a reason.
@@ -48,117 +74,113 @@ Versions come from tags named `vX.Y.Z`. Each version is published to PyPI as a
 `pixtreme-infer` wheel; there is no source distribution. Install it from PyPI. The GitHub
 Release of each version tag holds the same wheel and a `SHA256SUMS` file for verification.
 
-## CUDA Graph components for module authors
+## Native inference lifecycle
 
-`pixtreme.infer.cuda_graph` exports `CudaGraphSession` and `CudaGraphBuffers`.
-The core captures backend operations that enqueue work using fixed GPU storage.
-A module still validates every request, selects an operation, handles its temporal
-history and reset, and builds output metadata on every call. The core does not
-capture the module's public Frame call or import an inference backend.
+Architecture implementations derive from `pixtreme::infer::StatelessInference` or
+`TemporalInference` in `<pixtreme/infer/core.hpp>`. A constructor inspects the artifact
+and publishes its contract without initializing CUDA or allocating GPU memory.
+`prepare(device=0, stream=0)` rechecks that contract and acquires backend resources.
+Inference accepts one `pixtreme.core.Frame`, the declared CUDA parameters, an optional
+`reset` for temporal inference, and an explicit `stream` handle. Omitting the stream
+uses the legacy default stream. Calls before preparation, after a failed preparation,
+and after `close()` fail before backend work. `close()` is idempotent.
 
-A module can implement the optional
-`CudaGraphFactoryProvider[StatelessInferenceFactory[ArtifactIdentity]]` or
-`CudaGraphFactoryProvider[TemporalInferenceFactory[ArtifactIdentity]]` protocol
-from `pixtreme.infer.contracts`. Its `graph_factory()` returns a separate factory
-with the original inference form. Factory selection and `query_contract` allocate
-no GPU memory. `open` repeats configuration validation and prepares all graphs
-before returning an instance whose contract equals the query result. The normal
-factory keeps its existing operations and accepted settings; there is no new
-required setting on existing factories.
-
-Open a graph instance inside its device and an explicit non-default CUDA stream.
-One instance handles one fixed input configuration on that device and stream,
-with sequential host calls. Modules can prepare several named operations, with
-shared fixed storage and separate backend execution units where their backend
-requires them. The following fragment shows the integration inside a module;
-the backend callables, fixed Frames, GPU parameters, history, and execution units
-are prepared and owned by that module:
+A Python context manager prepares a newly constructed model with default arguments
+and closes it on exit. For an explicit stream, prepare before entering the context:
 
 ```python
-from pixtreme.infer.cuda_graph import CudaGraphBuffers, CudaGraphSession
+import pixtreme as px
 
-buffers = CudaGraphBuffers(
-    fixed_input_frame, fixed_output_frame, params=fixed_gpu_params,
-)
-graphs = CudaGraphSession(
-    {"route-a": enqueue_a, "route-b": enqueue_b},
-    resources=(buffers, *history, *execution_units),
-    after_prepare=restore_initial_history_and_controls,
-)
+stream = px.core.Stream(device=0, non_blocking=True)
+stream_handle = stream.ptr
+model = ModuleModel(artifact, precision="fp16", input_hw=(height, width), use_cuda_graph=True)
+model.prepare(device=0, stream=stream_handle)
+with model:
+    result = model(frame, stream=stream_handle, **gpu_parameters)
+    stream.synchronize()
 ```
 
-Each callable must enqueue on the current stream, use only fixed GPU addresses,
-and be safe for CUDA stream capture. Preparation calls each callable once for
-warm-up, waits for that stream, and captures it once. Keep every buffer and
-backend workspace used inside capture alive for the whole session, using the
-callable's owners or `resources`. Allocating an unretained temporary inside
-capture is invalid. Preparation can write history; `after_prepare` restores both
-GPU history and host controls to their open state without consuming requests.
-If any operation or this callback fails, preparation releases all captured graphs
-and retained references and propagates the error. The module's `open` must also
-release its own partially prepared resources. No partial instance or automatic
-normal-path fallback is returned.
+`ModuleModel` is the class supplied by an architecture distribution. Its constructor
+owns its artifact settings; core has no query/open factory. `model.contract` is an
+immutable copy of the C instance contract, including precision, fixed input shape,
+scale, CUDA Graph selection, and temporal state bytes where applicable.
+`model.family_contract` exposes the same native family's Frame and parameter declarations.
+Python contract construction uses the native C validation as well.
 
-For each request, the module first checks its Frame metadata, reset control, and
-parameter contract. It calls `graphs.check_context()` **before** copying inputs
-or resetting history. Then it can perform these steps:
+The native class interface requires architecture modules built for core 0.18 and
+pixtreme 2.4. Older modules exposing query/open factories are incompatible. The core's
+architecture table includes `spanv2` and `cda_vsr`; it does not recommend the older
+`span` distribution.
 
-```python
-# Module request validation and graph selection have already completed.
-graphs.check_context()
-buffers.copy_inputs(frame, **gpu_params)
-if reset:
-    reset_history_on_current_stream()
-graphs.replay(selected_name)
-result = buffers.copy_output(
-    channels=output_channels,
-    colorspace=output_colorspace,
-    gamma=output_gamma,
-    matrix=output_matrix,
-)
+## Binding an architecture module
+
+The public `<pixtreme/infer/nanobind.h>` adapter binds a consumer-side class derived
+from `pixtreme::infer::Model`. That consumer owns the C model handle. Construct the
+implementation with `make_model_handle<Implementation>(...)`, which transfers ownership
+to core; never bind the same implementation object as a second owning Python object.
+For example, after defining the architecture's consumer class and constructor:
+
+```cpp
+#include <pixtreme/infer/nanobind.h>
+
+NB_MODULE(_native, module) {
+    nanobind::class_<ModuleModel> model(module, "Model");
+    model.def(nanobind::init<ModuleSettings>());
+    pixtreme::infer::python::bind_model(model);
+}
 ```
 
-`copy_inputs` validates every source before the first copy and requires exact
-shape, dtype, device, and auxiliary names. It imports Frame storage through
-DLPack and accepts CUDA auxiliary arrays, including CAI v3 and CUDA DLPack
-producers. Sources must already be ready on the current stream and remain alive
-until its copies complete. Copying performs no casting, broadcasting, or host
-transfer, and the graph retains no caller input address. Modules validate reset
-before calling this method, so a structurally rejected request does not clear
-history or modify fixed storage. Auxiliary inputs are distinct from module-owned
-temporal history; reset and graph selection remain module responsibilities.
+The adapter uses only the C interface and public Python contract value types. Module
+and core extensions may use different nanobind domains; Python inheritance from a
+core class is not required. Frame arguments and owning results use pixtreme's public
+`<pixtreme/nanobind.h>` type casters. Module constructors can use the adapter's
+`pixtreme::infer::python::call` helper to apply the same error mapping: invalid arguments
+become `ValueError`, invalid lifecycle states and backend failures become `RuntimeError`,
+and allocation failures become `MemoryError`.
 
-`copy_output` allocates independent GPU storage outside capture and uses the
-metadata supplied for that request. Returned Frames remain unchanged by later
-replays, resets, and close. Requests enqueue without a host wait. Callers use
-CUDA events for another stream to consume results, and finish outstanding work
-before the module closes `graphs`, `buffers`, and its backend resources. Both
-component `close()` methods are idempotent and perform no synchronization; later
-operations on closed components fail before GPU work. Changing settings, device,
-or stream requires opening another instance; there is no automatic recapture or
-graph cache.
+## Native CUDA Graphs and verification
 
-For common verification, supply `CudaGraphContractSuite(module, replay_equivalence)`
-to `verify_cuda_graph_contract` in `pixtreme.infer.verification`. `module` is the
-existing `StatelessContractSuite` or `TemporalContractSuite`, populated from the
-graph factory and its instances. This runs `FactoryContractCases` unchanged and,
-for temporal modules, the existing reset, startup, instance isolation, and
-persistent state footprint checks. `replay_equivalence` supplies `SequenceFacts`
-from separate normal and graph instances with the same settings, including the
-first call, continuation, changed input values and metadata, and resets. Missing
-evidence stays unverified. Modules retain ownership of their fixtures, correctness
-thresholds, support declarations, and evidence. Performance measurements do not
-determine support status.
+The constructor's `use_cuda_graph` selects core's C++ graph implementation. Graph
+preparation requires an explicit non-default stream. The module supplies fixed GPU
+buffers, allocation-free backend enqueue hooks, route selection, and temporal reset.
+Core warms up and captures every route during preparation, restores initial state,
+and releases partial resources if preparation fails. Preparation consumes no requests.
 
-The opt-in synthetic GPU tests use no TensorRT or tensoracle. Run correctness with
-`uv run --no-sync python -m pytest -m 'gpu and not performance' tests/test_cuda_graph_gpu.py`,
-selecting the GPU with `CUDA_VISIBLE_DEVICES` when the machine has several.
-The `performance` cases record video-sized copy latency with CUDA events and print
-median and p90 values; they apply no speed threshold.
+Core validates request structure before copying inputs, resetting state, or replaying.
+Input/output copies stay outside capture. Returned Frames own independent pixels and
+are not changed by later requests or model cleanup. Native input pixels may be released
+after submission because pixtreme records their reads; callers retain borrowed pixels
+and auxiliary storage until the queued work finishes. Output writes are recorded on
+the supplied stream. Use Frame `wait` before reading on another stream and
+`record_stream` after its last queued use, or acquire through DLPack for its stream
+handoff. Finish pending work before closing backend resources.
+
+Graph outputs allocate their pixels on the inference stream passed to `prepare`.
+Keep that stream alive until the last reference to every returned Frame, shallow
+clone, and exported DLPack view has been released, including after the model is
+closed. Prefer a stream owned by pixtreme (`px.core.Stream`) and pass its numeric
+`stream.ptr` handle, as in the example above. Pixtreme retains this allocation
+stream for the output pixels, so its Python object can be released earlier.
+For an external stream, such as one created by CuPy, the caller must keep the
+stream alive through those final references.
+
+`pixtreme.infer.verification` remains Python. Supply `LifecycleContractCases` for
+constructor allocations, contract equivalence before/after preparation, rejection
+before preparation and after failure/close, and resource rollback after failed
+preparation. `verify_module_contract` also checks Frame boundaries and temporal state.
+`verify_cuda_graph_contract(CudaGraphContractSuite(...))` reuses those checks and compares
+complete request sequences with independently prepared normal instances. Missing
+observations remain unverified. Architecture modules own their fixtures, thresholds,
+support declarations, and evidence.
+
+Run the synthetic native GPU binding tests with
+`uv run --no-sync python -m pytest -m gpu tests/test_native_binding.py` and select the
+GPU through `CUDA_VISIBLE_DEVICES`.
 
 ## License
 
 The core distribution `pixtreme-infer` is licensed under the MIT License; see
-[LICENSE](LICENSE). Architecture distributions are separate distributions, each with its own
+[LICENSE](LICENSE). The wheel also includes nanobind (BSD-3-Clause), robin-map (MIT),
+and a CUDA runtime license notice in `dist-info/licenses/`. Architecture distributions are separate distributions, each with its own
 license. The core license does not apply to them, and installing one does not change the core
 license.
