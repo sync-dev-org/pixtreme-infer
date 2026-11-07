@@ -12,7 +12,7 @@ maintained and distributed separately as architecture distributions.
 
 ## Capabilities
 
-The base dependency is `pixtreme>=2.4.0`. Optional capabilities are separated by extra:
+The base dependency is `pixtreme>=2.6.0`. Optional capabilities are separated by extra:
 
 - `verify`: device telemetry for the shared verification tools.
 
@@ -45,7 +45,7 @@ nanobind adapter, CMake package and shared
 library under `pixtreme/infer/`. Module builds find the CMake package with
 `pixtreme.infer.get_cmake_dir()` and link `pixtreme_infer::pixtreme_infer`. The SDK
 uses the shared library supplied by the installed `pixtreme` distribution. The wheel
-contains one shared library, `libpixtreme_infer.so.1`. Importing
+contains one shared library, `libpixtreme_infer.so.2`. Importing
 `pixtreme.infer` loads its extension and shared library without initializing CUDA.
 
 A native consumer declares the SDK dependency in its `CMakeLists.txt`:
@@ -80,7 +80,7 @@ Architecture implementations derive from `pixtreme::infer::StatelessInference` o
 `TemporalInference` in `<pixtreme/infer/core.hpp>`. A constructor inspects the artifact
 and publishes its contract without initializing CUDA or allocating GPU memory.
 `prepare(device=0, stream=0)` rechecks that contract and acquires backend resources.
-Inference accepts one `pixtreme.core.Frame`, the declared CUDA parameters, an optional
+Inference accepts one `pixtreme.core.Frame`, named `pixtreme.NDArray` parameters, an optional
 `reset` for temporal inference, and an explicit `stream` handle. Omitting the stream
 uses the legacy default stream. Calls before preparation, after a failed preparation,
 and after `close()` fail before backend work. `close()` is idempotent.
@@ -104,6 +104,15 @@ with model:
 owns its artifact settings; core has no query/open factory. `model.contract` is an
 immutable copy of the C instance contract, including precision, fixed input shape,
 scale, CUDA Graph selection, and temporal state bytes where applicable.
+
+Auxiliary values use the names declared by the family. Pass `pixtreme.NDArray`
+objects as keyword arguments; other values, including CuPy arrays, are rejected.
+Wrap a DLPack producer explicitly with `pixtreme.NDArray.from_dlpack(array)`.
+The C interface accepts name/`pixtreme_ndarray_t` pairs. C++ consumers can call
+`model.run(frame, {{"motion", motion_array}}, stream)` with a `pixtreme::ndarray`.
+Module/backend fixed buffers and output descriptors continue to use `DLTensor`.
+The C ABI is 2.0; modules built against ABI 1 must be rebuilt for SONAME 2.
+
 `model.family_contract` exposes the same native family's Frame and parameter declarations.
 Python contract construction uses the native C validation as well.
 
@@ -158,8 +167,11 @@ and releases partial resources if preparation fails. Preparation consumes no req
 Core validates request structure before copying inputs, resetting state, or replaying.
 Input/output copies stay outside capture. Returned Frames own independent pixels and
 are not changed by later requests or model cleanup. Native input pixels may be released
-after submission because pixtreme records their reads; callers retain borrowed pixels
-and auxiliary storage until the queued work finishes. Output writes are recorded on
+after submission because pixtreme records their reads. The same rule applies to
+auxiliary NDArrays allocated by pixtreme: core waits for recorded writers and records
+its reads, so callers may release the arrays as soon as inference returns. For borrowed
+or DLPack-imported arrays and Frames, callers keep the external memory owner alive
+until the inference stream finishes reading it. Output writes are recorded on
 the supplied stream. Use Frame `wait` before reading on another stream and
 `record_stream` after its last queued use, or acquire through DLPack for its stream
 handoff. Finish pending work before closing backend resources.
