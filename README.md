@@ -130,13 +130,22 @@ NB_MODULE(_native, module) {
 }
 ```
 
-The adapter uses only the C interface and public Python contract value types. Module
+The adapter uses the header-only C++ wrapper and public Python contract value types. Module
 and core extensions may use different nanobind domains; Python inheritance from a
 core class is not required. Frame arguments and owning results use pixtreme's public
 `<pixtreme/nanobind.h>` type casters. Module constructors can use the adapter's
 `pixtreme::infer::python::call` helper to apply the same error mapping: invalid arguments
 become `ValueError`, invalid lifecycle states and backend failures become `RuntimeError`,
 and allocation failures become `MemoryError`.
+
+`pixtreme::infer::Family::create(desc)` owns a standalone family and copies the input
+declaration, strings, and arrays through the C interface. `Family` is move-only;
+moving transfers ownership, and destruction or move assignment releases the previously
+owned family. `Family::desc()` borrows its declaration and nested storage until that
+family is destroyed or replaced. `pixtreme::infer::family_desc(model.contract().family)`
+borrows a model's family declaration until the model is destroyed; closing the model
+does not end that borrow. Never destroy a borrowed family. The adapter copies borrowed
+declarations into Python values while their owner is alive.
 
 ## Native CUDA Graphs and verification
 
