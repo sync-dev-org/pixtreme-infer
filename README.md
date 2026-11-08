@@ -132,12 +132,23 @@ For example, after defining the architecture's consumer class and constructor:
 ```cpp
 #include <pixtreme/infer/nanobind.h>
 
+namespace my_architecture {
+class Model : public pixtreme::infer::Model { /* ... */ };
+}
+
 NB_MODULE(_native, module) {
-    nanobind::class_<ModuleModel> model(module, "Model");
+    nanobind::class_<my_architecture::Model> model(module, "Model");
     model.def(nanobind::init<ModuleSettings>());
     pixtreme::infer::python::bind_model(model);
 }
 ```
+
+Several architecture modules can be loaded in one Python process. nanobind matches
+bound types across extensions by their C++ type name, so every C++ type a module binds
+with `nanobind::class_` must have a name no other module uses: declare it in a namespace
+named after the architecture, not in an anonymous namespace (an anonymous-namespace
+`Model` has the same type name in every extension). Alternatively, give each extension
+its own nanobind domain with `nanobind_add_module(... NB_DOMAIN <name> ...)`.
 
 The adapter uses the header-only C++ wrapper and public Python contract value types. Module
 and core extensions may use different nanobind domains; Python inheritance from a
