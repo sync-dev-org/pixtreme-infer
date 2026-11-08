@@ -45,7 +45,7 @@ nanobind adapter, CMake package and shared
 library under `pixtreme/infer/`. Module builds find the CMake package with
 `pixtreme.infer.get_cmake_dir()` and link `pixtreme_infer::pixtreme_infer`. The SDK
 uses the shared library supplied by the installed `pixtreme` distribution. The wheel
-contains one shared library, `libpixtreme_infer.so.2`. Importing
+contains one shared library, `libpixtreme_infer.so.3`. Importing
 `pixtreme.infer` loads its extension and shared library without initializing CUDA.
 
 A native consumer declares the SDK dependency in its `CMakeLists.txt`:
@@ -110,8 +110,13 @@ objects as keyword arguments; other values, including CuPy arrays, are rejected.
 Wrap a DLPack producer explicitly with `pixtreme.NDArray.from_dlpack(array)`.
 The C interface accepts name/`pixtreme_ndarray_t` pairs. C++ consumers can call
 `model.run(frame, {{"motion", motion_array}}, stream)` with a `pixtreme::ndarray`.
-Module/backend fixed buffers and output descriptors continue to use `DLTensor`.
-The C ABI is 2.0; modules built against ABI 1 must be rebuilt for SONAME 2.
+Core and modules exchange CUDA pixels and arrays only as `pixtreme_frame_t` and
+`pixtreme_ndarray_t`, and the public headers declare no DLPack types. The input
+staging helper writes name/NDArray destinations, the output helper reads a
+three-dimensional HWC NDArray, and a graph declaration lists its routes only. A module
+chooses how its backend reads that storage; `pixtreme_ndarray_borrow` describes
+module-allocated memory without copying it.
+The C ABI is 3.0; modules built against ABI 2 or earlier must be rebuilt for SONAME 3.
 
 `model.family_contract` exposes the same native family's Frame and parameter declarations.
 Python contract construction uses the native C validation as well.
@@ -170,8 +175,8 @@ declarations into Python values while their owner is alive.
 ## Native CUDA Graphs and verification
 
 The constructor's `use_cuda_graph` selects core's C++ graph implementation. Graph
-preparation requires an explicit non-default stream. The module supplies fixed GPU
-buffers, allocation-free backend enqueue hooks, route selection, and temporal reset.
+preparation requires an explicit non-default stream. The module owns its fixed GPU
+storage and supplies allocation-free backend enqueue hooks, route selection, and temporal reset.
 Core warms up and captures every route during preparation, restores initial state,
 and releases partial resources if preparation fails. Preparation consumes no requests.
 
