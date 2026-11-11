@@ -122,7 +122,11 @@ staging helper writes name/NDArray destinations, the output helper reads a
 three-dimensional HWC NDArray, and a graph declaration lists its routes only. A module
 chooses how its backend reads that storage; `pixtreme_ndarray_borrow` describes
 module-allocated memory without copying it.
-The C ABI is 3.0; modules built against ABI 2 or earlier must be rebuilt for SONAME 3.
+The C ABI is 3.1; modules built against ABI 2 or earlier must be rebuilt for SONAME 3.
+Preparation, inference, `close()` and destruction run on the prepared device: core makes
+it current for the call and returns with the calling thread's current CUDA device and
+context unchanged, on success and on failure, even when the module selects its own device
+inside. A thread whose current device differs can therefore run and release the model.
 
 `model.family_contract` exposes the same native family's Frame and parameter declarations.
 Python contract construction uses the native C validation as well.
@@ -133,6 +137,98 @@ pixtreme headers of the installed pixtreme: pixtreme 2.14 rejects code built wit
 older than its C ABI 2.54. The core's
 architecture table includes `spanv2` and `cda_vsr`; it does not recommend the older
 `span` distribution.
+
+## Creating a module by name from C and C++
+
+C and C++ consumers can create a module's model from the module name and name/value
+string options, without linking the module. The result is an ordinary model handle:
+prepare, run, close and destroy it as above. Python keeps the module classes.
+
+```c
+pixtreme_infer_option_t weights = PIXTREME_INFER_OPTION_INIT, precision = PIXTREME_INFER_OPTION_INIT;
+weights.name = "weights"; weights.value = "/models/spanv2.safetensors";
+precision.name = "precision"; precision.value = "fp16";
+/* ... input_height, input_width, and optionally use_cuda_graph ... */
+const pixtreme_infer_option_t *options[] = {&weights, &precision /* , ... */};
+pixtreme_infer_model_t *model = NULL;
+pixtreme_infer_error_t *error = NULL;
+pixtreme_infer_status_t status = pixtreme_infer_model_create_by_name(
+    "spanv2", options, sizeof options / sizeof options[0], &model, &error);
+```
+
+```cpp
+auto model = pixtreme::infer::Model::create_by_name("spanv2", {
+    {"weights", "/models/spanv2.safetensors"}, {"precision", "fp16"},
+    {"input_height", "720"}, {"input_width", "1280"}, {"use_cuda_graph", "true"}});
+```
+
+A module name matches `[a-z][a-z0-9_]*` and equals the module's Python root
+`pixtreme.infer.<name>`. Option values are strings: integers are decimal, booleans are
+`true` or `false`, rationals are `<numerator>/<denominator>`, and a hierarchical name
+separates its levels with `.`. Empty values are never integers, booleans or rationals;
+whether an empty text value is acceptable is up to each module. Every module accepts the
+common options `weights` (a nonempty path; relative paths resolve against the process
+working directory), `precision` (`fp32`,
+`fp16`, `int8` or `fp8`), `input_height`, `input_width` and `use_cuda_graph`
+(default `false`). The module rejects unknown, duplicate and missing options and values
+of the wrong type or range by option name; errors never contain option values.
+
+The status tells the failures apart: `PIXTREME_INFER_INVALID_ARGUMENT` for a malformed
+name or rejected options, `PIXTREME_INFER_MODULE_NOT_FOUND` when the module is not
+installed (the message names the distribution to install for a published module),
+`PIXTREME_INFER_MODULE_LOAD_FAILED` when its entry library exists but cannot be
+loaded (the message carries the loader's reason), and `PIXTREME_INFER_INCOMPATIBLE_ABI`
+when its entry is missing or was built for an incompatible core ABI. Creation can be
+called from several threads, and each call returns an independent model. To replace a
+running model, close and destroy the old model and create the new one.
+
+A module distribution makes itself available by name with one entry library:
+
+- File: `pixtreme/infer/<name>/lib/libpixtreme_infer_<name>_entry.so` in the wheel. The
+  core derives the path from the directory that contains its own `lib/` directory (the
+  directory of `pixtreme/infer/lib/libpixtreme_infer.so.3`), without scanning
+  directories, reading environment variables or reading registration files. The file name carries no module ABI version: the entry library
+  depends on the module's own shared library (`NEEDED`, with RUNPATH `$ORIGIN`), so both
+  the Python binding and creation by name use the same loaded module library.
+- Entry function: the entry library exports
+  `const pixtreme_infer_module_entry_t *pixtreme_infer_module_entry(void)` with C linkage.
+  It returns a descriptor with static storage and does no CUDA, file or allocation work.
+- ABI: the descriptor carries the core ABI the module was built against
+  (`PIXTREME_INFER_MODULE_ENTRY_INIT` fills `PIXTREME_INFER_ABI_MAJOR` and `_MINOR`) and
+  the module's creation function. The core calls that function only when the majors
+  are equal and the module's minor is not newer than the core's.
+- Lifetime: the core opens each name's entry library once per process and never closes
+  it. Module state shared by instances must be thread-safe, and instances used on
+  different threads must give the results each gives alone. A different module build
+  takes effect in a new process.
+
+Modules read their options with `pixtreme::infer::Settings` and
+`pixtreme::infer::read_common_settings` from `<pixtreme/infer/core.hpp>`, which apply
+these value forms and error rules in one place:
+
+```cpp
+pixtreme_infer_status_t create(const pixtreme_infer_option_t *const *options, uint64_t count,
+                               pixtreme_infer_model_t **model, pixtreme_infer_error_t **error) {
+    if (model) *model = nullptr;
+    return pixtreme::infer::boundary(error, [&] {
+        pixtreme::infer::Settings settings(options, count);
+        auto common = pixtreme::infer::read_common_settings(settings);
+        settings.finish(); // rejects every option no reader asked for
+        *model = pixtreme::infer::make_model_handle<my_architecture::Implementation>(common);
+    });
+}
+extern "C" __attribute__((visibility("default")))
+const pixtreme_infer_module_entry_t *pixtreme_infer_module_entry(void) noexcept {
+    static const pixtreme_infer_module_entry_t entry = {
+        sizeof(pixtreme_infer_module_entry_t), PIXTREME_INFER_ABI_MAJOR, PIXTREME_INFER_ABI_MINOR, create};
+    return &entry;
+}
+```
+
+The core's static table of published module names and distributions (`spanv2`,
+`cda_vsr`) only guides installation; an unlisted name is created when its entry library
+is installed. `pixtreme_infer_module_distribution` reads the table. Creation by name is
+implemented for the Linux wheel layout.
 
 ## Binding an architecture module
 
@@ -183,7 +279,11 @@ declarations into Python values while their owner is alive.
 ## Native CUDA Graphs and verification
 
 The constructor's `use_cuda_graph` selects core's C++ graph implementation. Graph
-preparation requires an explicit non-default stream. The module owns its fixed GPU
+preparation requires an explicit stream created with `cudaStreamNonBlocking`
+(`px.core.Stream(non_blocking=True)` in Python) and rejects other streams before
+recording any graph, so work on the legacy default stream elsewhere does not disturb the
+capture. While a model prepares, no thread may synchronize the whole device, because that
+invalidates the capture. The module owns its fixed GPU
 storage and supplies allocation-free backend enqueue hooks, route selection, and temporal reset.
 Core warms up and captures every route during preparation, restores initial state,
 and releases partial resources if preparation fails. Preparation consumes no requests.
