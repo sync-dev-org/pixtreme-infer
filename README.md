@@ -12,7 +12,7 @@ maintained and distributed separately as architecture distributions.
 
 ## Capabilities
 
-The base dependency is `pixtreme>=2.14.0`. Optional capabilities are separated by extra:
+The base dependency is `pixtreme>=2.17.0`. Optional capabilities are separated by extra:
 
 - `verify`: device telemetry for the shared verification tools.
 
@@ -46,6 +46,26 @@ because the `pixtreme` package itself comes from the `pixtreme` wheel. `uv sync`
 that wheel, so run the first two commands again after `uv sync` and after changing the
 Python or C++ source, and pass `--no-sync` to `uv run`.
 
+The C++ build takes its C and C++ dependencies from Conan with the recipe and lock in `cpp/`,
+including pixtreme's prebuilt C and C++ SDK and shared library and the CUDA runtime. For the
+pixtreme version that the lock records, the build downloads the recipe archive from
+[pixtreme's public GitHub Release](https://github.com/sync-dev-org/pixtreme/releases) without
+credentials, checks it against the Release's `SHA256SUMS`, and exports its recipes. The build
+needs the Conan CLI version that `python/pyproject.toml` pins. Build and test the standalone SDK
+from the repository root:
+
+```console
+uv tool install conan==2.34.0
+cmake -P cpp/conan/prepare-tests.cmake
+cmake -S cpp -B build/cpp -G Ninja
+cmake --build build/cpp
+ctest --test-dir build/cpp --output-on-failure
+```
+
+No step compiles pixtreme: its Conan package unpacks the prebuilt SDK of the Release. The
+wheel never contains pixtreme: its library needs `libpixtreme.so.2` and finds it in the
+installed `pixtreme` distribution, which must be at least the version whose SDK the build used.
+
 The wheel includes the nanobind extension, C interface, header-only C++ wrapper and
 nanobind adapter, CMake package and shared
 library under `pixtreme/infer/`. Module builds find the CMake package with
@@ -78,7 +98,67 @@ dependencies skip with a reason.
 
 Versions come from tags named `vX.Y.Z`. Each version is published to PyPI as a
 `pixtreme-infer` wheel; there is no source distribution. Install it from PyPI. The GitHub
-Release of each version tag holds the same wheel and a `SHA256SUMS` file for verification.
+Release of each version tag holds the same wheel, the C and C++ SDK archive, the Conan
+recipe archive that acquires that SDK, and a `SHA256SUMS` file covering all three.
+
+## C and C++ SDK through Conan
+
+Starting with 0.23.0, C and C++ consumers can take the core SDK as a Conan 2 shared-library
+package, without the core source, without compiling the core, and without authentication.
+The GitHub Release of tag `vX.Y.Z` holds two archives for this:
+
+- `pixtreme-infer-sdk-X.Y.Z-manylinux_2_28_x86_64.tar.gz`: the shared library
+  `libpixtreme_infer.so.3`, the C interface, the header-only C++ wrapper and nanobind adapter,
+  the CMake package, and the license files. These are the same bytes as in the wheel of that
+  version.
+- `pixtreme-infer-recipes-X.Y.Z.tar.gz`: the Conan recipe `pixtreme-infer/`, which downloads
+  that SDK archive by URL and SHA256, together with `recipes.json` and `LICENSE`.
+
+The recipe requires pixtreme's shared-library package, `pixtreme/[>=A.B.C]`, where A.B.C is
+the pixtreme version that the release was built with. pixtreme provides its recipe the same
+way, in the Release of [pixtreme](https://github.com/sync-dev-org/pixtreme) 2.17.0 and later.
+Download both recipe archives over HTTPS, which needs no GitHub login. `<release>` stands for
+the download URL of this repository's GitHub Release of tag `vX.Y.Z`. Then export both recipes:
+
+```console
+curl -fLO https://github.com/sync-dev-org/pixtreme/releases/download/v2.17.0/pixtreme-recipes-2.17.0.tar.gz
+curl -fLO <release>/pixtreme-infer-recipes-X.Y.Z.tar.gz
+mkdir pixtreme-recipes pixtreme-infer-recipes
+tar -xzf pixtreme-recipes-2.17.0.tar.gz -C pixtreme-recipes
+tar -xzf pixtreme-infer-recipes-X.Y.Z.tar.gz -C pixtreme-infer-recipes
+conan export pixtreme-recipes/pixtreme
+conan export pixtreme-infer-recipes/pixtreme-infer
+```
+
+Require the core from the consumer's `conanfile.txt` and let `CMakeToolchain` describe it:
+
+```ini
+[requires]
+pixtreme-infer/X.Y.Z
+
+[generators]
+CMakeToolchain
+```
+
+```console
+conan install . --output-folder build --build=missing
+cmake -S . -B build -G Ninja -DCMAKE_TOOLCHAIN_FILE="$PWD/build/conan_toolchain.cmake" -DCMAKE_BUILD_TYPE=Release
+cmake --build build
+source build/conanrun.sh
+./build/my_consumer
+```
+
+`conan install` uses your Conan profile; `conan profile detect` creates one in a new Conan
+home. `--build=missing` only unpacks the two prebuilt SDK archives; neither recipe compiles
+anything. Run the consumer in Conan's run environment (`build/conanrun.sh`, or the
+`VirtualRunEnv` generator), which puts both packages' library directories on the loader path.
+The core library is the same file as in the wheel and searches for `libpixtreme.so.2` only in
+the wheel layout, so a consumer that calls only the core API does not find pixtreme without
+that environment.
+The consumer's `CMakeLists.txt` reads the SDK's own CMake package, as with the wheel:
+`find_package(pixtreme_infer CONFIG REQUIRED)` and link `pixtreme_infer::pixtreme_infer`,
+which also links `pixtreme::pixtreme`. One process loads only one pixtreme library: do not
+load the wheel's `libpixtreme.so.2` and the Conan package's in the same process.
 
 ## Native inference lifecycle
 
