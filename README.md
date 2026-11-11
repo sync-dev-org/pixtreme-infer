@@ -12,7 +12,7 @@ maintained and distributed separately as architecture distributions.
 
 ## Capabilities
 
-The base dependency is `pixtreme>=2.6.0`. Optional capabilities are separated by extra:
+The base dependency is `pixtreme>=2.14.0`. Optional capabilities are separated by extra:
 
 - `verify`: device telemetry for the shared verification tools.
 
@@ -31,7 +31,8 @@ The standalone C++ SDK is in `cpp/`; the Python project and its environment are 
 
 ```console
 cd python
-uv sync --all-extras
+uv sync --all-extras --no-install-project
+uv pip install --no-deps --reinstall-package pixtreme-infer .
 uv lock --check
 CUDA_VISIBLE_DEVICES='' uv run --no-sync python -m pytest -q
 uv run --no-sync mypy
@@ -39,6 +40,11 @@ uv run --no-sync ruff check src tests
 uv run --no-sync ruff format --check src tests
 uv build --wheel
 ```
+
+The environment holds `pixtreme-infer` as an installed wheel, not an editable install,
+because the `pixtreme` package itself comes from the `pixtreme` wheel. `uv sync` removes
+that wheel, so run the first two commands again after `uv sync` and after changing the
+Python or C++ source, and pass `--no-sync` to `uv run`.
 
 The wheel includes the nanobind extension, C interface, header-only C++ wrapper and
 nanobind adapter, CMake package and shared
@@ -121,8 +127,10 @@ The C ABI is 3.0; modules built against ABI 2 or earlier must be rebuilt for SON
 `model.family_contract` exposes the same native family's Frame and parameter declarations.
 Python contract construction uses the native C validation as well.
 
-The native class interface requires architecture modules built for core 0.18 and
-pixtreme 2.4. Older modules exposing query/open factories are incompatible. The core's
+The native class interface requires architecture modules built for core 0.18 or later.
+Older modules exposing query/open factories are incompatible. Build modules against the
+pixtreme headers of the installed pixtreme: pixtreme 2.14 rejects code built with headers
+older than its C ABI 2.54. The core's
 architecture table includes `spanv2` and `cda_vsr`; it does not recommend the older
 `span` distribution.
 
