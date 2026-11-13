@@ -12,7 +12,7 @@ maintained and distributed separately as architecture distributions.
 
 ## Capabilities
 
-The base dependency is `pixtreme>=2.17.0`. Optional capabilities are separated by extra:
+The base dependency is `pixtreme>=2.21.0`. Optional capabilities are separated by extra:
 
 - `verify`: device telemetry for the shared verification tools.
 
@@ -98,36 +98,26 @@ dependencies skip with a reason.
 
 Versions come from tags named `vX.Y.Z`. Each version is published to PyPI as a
 `pixtreme-infer` wheel; there is no source distribution. Install it from PyPI. The GitHub
-Release of each version tag holds the same wheel, the C and C++ SDK archive, the Conan
-recipe archive that acquires that SDK, and a `SHA256SUMS` file covering all three.
+Release of each version tag holds the same wheel, the C and C++ SDK archive, and a
+`SHA256SUMS` file covering both.
 
 ## C and C++ SDK through Conan
 
-Starting with 0.23.0, C and C++ consumers can take the core SDK as a Conan 2 shared-library
-package, without the core source, without compiling the core, and without authentication.
-The GitHub Release of tag `vX.Y.Z` holds two archives for this:
+C and C++ consumers take the core SDK as a Conan 2 shared-library package. The public
+`pixtreme-infer-sdk-X.Y.Z-manylinux_2_28_x86_64.tar.gz` archive contains
+`libpixtreme_infer.so.3`, the C interface, the header-only C++ wrapper and nanobind adapter,
+the CMake package, license files and `sdk.json`. Library, header and CMake bytes match the wheel.
 
-- `pixtreme-infer-sdk-X.Y.Z-manylinux_2_28_x86_64.tar.gz`: the shared library
-  `libpixtreme_infer.so.3`, the C interface, the header-only C++ wrapper and nanobind adapter,
-  the CMake package, and the license files. These are the same bytes as in the wheel of that
-  version.
-- `pixtreme-infer-recipes-X.Y.Z.tar.gz`: the Conan recipe `pixtreme-infer/`, which downloads
-  that SDK archive by URL and SHA256, together with `recipes.json` and `LICENSE`.
-
-The recipe requires pixtreme's shared-library package, `pixtreme/[>=A.B.C]`, where A.B.C is
-the pixtreme version that the release was built with. pixtreme provides its recipe the same
-way, in the Release of [pixtreme](https://github.com/sync-dev-org/pixtreme) 2.17.0 and later.
-Download both recipe archives over HTTPS, which needs no GitHub login. `<release>` stands for
-the download URL of this repository's GitHub Release of tag `vX.Y.Z`. Then export both recipes:
+Take both shared recipes from
+[sync-dev-org/conan-recipes](https://github.com/sync-dev-org/conan-recipes#using-a-recipe),
+following its authenticated GitHub API asset download instructions and checksum verification.
+Their `from_source` options default to `False`, selecting the public prebuilt SDKs.
+`<shared-recipes>` below is the extracted organization archive. Choose a pixtreme SDK version
+that satisfies the shared core recipe's lower bound:
 
 ```console
-curl -fLO https://github.com/sync-dev-org/pixtreme/releases/download/v2.17.0/pixtreme-recipes-2.17.0.tar.gz
-curl -fLO <release>/pixtreme-infer-recipes-X.Y.Z.tar.gz
-mkdir pixtreme-recipes pixtreme-infer-recipes
-tar -xzf pixtreme-recipes-2.17.0.tar.gz -C pixtreme-recipes
-tar -xzf pixtreme-infer-recipes-X.Y.Z.tar.gz -C pixtreme-infer-recipes
-conan export pixtreme-recipes/pixtreme
-conan export pixtreme-infer-recipes/pixtreme-infer
+conan export <shared-recipes>/recipes/pixtreme --version <pixtreme-version>
+conan export <shared-recipes>/recipes/pixtreme-infer --version X.Y.Z
 ```
 
 Require the core from the consumer's `conanfile.txt` and let `CMakeToolchain` describe it:
@@ -159,6 +149,30 @@ The consumer's `CMakeLists.txt` reads the SDK's own CMake package, as with the w
 `find_package(pixtreme_infer CONFIG REQUIRED)` and link `pixtreme_infer::pixtreme_infer`,
 which also links `pixtreme::pixtreme`. One process loads only one pixtreme library: do not
 load the wheel's `libpixtreme.so.2` and the Conan package's in the same process.
+
+To embed the core in a native library or application, build it from source with
+`BUILD_SHARED_LIBS=OFF`. The default is ON; each build and installation contains one
+form of the core, and both forms use `pixtreme_infer::pixtreme_infer`:
+
+```console
+cmake -P cpp/conan/prepare-tests.cmake
+cmake -S cpp -B build/static -G Ninja -DBUILD_SHARED_LIBS=OFF
+cmake --build build/static
+ctest --test-dir build/static --output-on-failure
+cmake --install build/static --prefix "$PWD/static-sdk"
+```
+
+The installed static archive contains only the core's objects. The consumer's toolchain
+provides pixtreme's CMake package and sets `PIXTREME_INFER_CUDA_ROOT` to its Conan CUDA
+runtime package. Add the installed SDK to `CMAKE_PREFIX_PATH`; linking the public target
+also supplies pixtreme, the static CUDA runtime and the required system libraries. The
+installed package records no absolute dependency paths from the core's build machine.
+
+One process uses one core. A statically embedded core resolves only the module entries
+supplied with `pixtreme_infer_module_entries_set`; an unlisted name returns
+`PIXTREME_INFER_MODULE_NOT_FOUND` without opening a shared module. The wheel and Release
+SDK archives contain the shared core, and wheel builds explicitly select it. The Conan
+recipe's static option is not yet available.
 
 ## Native inference lifecycle
 
@@ -205,8 +219,10 @@ module-allocated memory without copying it.
 The C ABI is 3.2; modules built against ABI 2 or earlier must be rebuilt for SONAME 3.
 Preparation, inference, `close()` and destruction run on the prepared device: core makes
 it current for the call and returns with the calling thread's current CUDA device and
-context unchanged, on success and on failure, even when the module selects its own device
-inside. A thread whose current device differs can therefore run and release the model.
+context unchanged, on success and on failure. A thread whose current device differs can
+therefore run and release the model. Module callbacks for preparation, inference and
+release must use the model context made current by core and must not call `cudaSetDevice`:
+a module linked into the executable shares the caller's CUDA runtime device state.
 
 `model.family_contract` exposes the same native family's Frame and parameter declarations.
 Python contract construction uses the native C validation as well.
@@ -321,6 +337,12 @@ A module distribution makes itself available by name with one entry library:
   different threads must give the results each gives alone. A different module build
   takes effect in a new process.
 
+Module callbacks for preparation, inference and release must use the model context made
+current by core and must not call `cudaSetDevice`. With a statically linked CUDA runtime,
+each runtime copy keeps its own device number for threads without a current context.
+A module linked into the executable shares the caller's runtime copy, so `cudaSetDevice`
+inside a callback changes the caller's device number.
+
 Modules read their options with `pixtreme::infer::Settings` and
 `pixtreme::infer::read_common_settings` from `<pixtreme/infer/core.hpp>`, which apply
 these value forms and error rules in one place:
@@ -404,9 +426,20 @@ The constructor's `use_cuda_graph` selects core's C++ graph implementation. Grap
 preparation requires an explicit stream created with `cudaStreamNonBlocking`
 (`px.core.Stream(non_blocking=True)` in Python) and rejects other streams before
 recording any graph, so work on the legacy default stream elsewhere does not disturb the
-capture. While a model prepares, no thread may synchronize the whole device, because that
-invalidates the capture. The module owns its fixed GPU
-storage and supplies allocation-free backend enqueue hooks, route selection, and temporal reset.
+capture. Core orders graph capture against module preparation, `close()` and the
+close performed by prepared destruction across all threads in the process. These
+lifecycle calls may wait for another model's preparation or release; inference,
+creation, named creation and queries continue without waiting for that ordering.
+Module preparation and release may synchronize the CUDA context. Modules create and
+release backend resources only during preparation, close and destruction. A module
+callback must not wait for another thread calling core preparation, close or
+destruction, and callers must not hold locks those callbacks need during lifecycle
+calls. A callback can use another instance's lifecycle operations on the same thread.
+While a model prepares, no thread may synchronize the whole device outside core's
+lifecycle operations, because that invalidates the capture. Core does not order
+captures or backend resource operations performed outside core. The module owns its
+fixed GPU storage and supplies allocation-free backend enqueue hooks, route selection,
+and temporal reset.
 Core warms up and captures every route during preparation, restores initial state,
 and releases partial resources if preparation fails. Preparation consumes no requests.
 
