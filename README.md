@@ -163,10 +163,13 @@ cmake --install build/static --prefix "$PWD/static-sdk"
 ```
 
 The installed static archive contains only the core's objects. The consumer's toolchain
-provides pixtreme's CMake package and sets `PIXTREME_INFER_CUDA_ROOT` to its Conan CUDA
-runtime package. Add the installed SDK to `CMAKE_PREFIX_PATH`; linking the public target
-also supplies pixtreme, the static CUDA runtime and the required system libraries. The
-installed package records no absolute dependency paths from the core's build machine.
+provides pixtreme's CMake package and the `CUDAToolkit` module finder. With Conan, the
+`cuda-toolkit` package supplies `cmake/FindCUDAToolkit.cmake` through `CMAKE_MODULE_PATH`.
+Outside Conan, pass `-DCMAKE_MODULE_PATH=<cuda-package>/cmake` and
+`-DCUDAToolkit_ROOT=<cuda-package>`. Add the installed SDK to `CMAKE_PREFIX_PATH`;
+linking the public target also supplies pixtreme, `CUDA::cudart_static` and the required
+system libraries. The installed package records no absolute dependency paths from the
+core's build machine.
 
 One process uses one core. A statically embedded core resolves only the module entries
 supplied with `pixtreme_infer_module_entries_set`; an unlisted name returns
