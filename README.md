@@ -36,8 +36,8 @@ uv pip install --no-deps --reinstall-package pixtreme-infer .
 uv lock --check
 CUDA_VISIBLE_DEVICES='' uv run --no-sync python -m pytest -q
 uv run --no-sync mypy
-uv run --no-sync ruff check src tests
-uv run --no-sync ruff format --check src tests
+uv run --no-sync ruff check src tests tools
+uv run --no-sync ruff format --check src tests tools
 uv build --wheel
 ```
 
@@ -202,7 +202,7 @@ staging helper writes name/NDArray destinations, the output helper reads a
 three-dimensional HWC NDArray, and a graph declaration lists its routes only. A module
 chooses how its backend reads that storage; `pixtreme_ndarray_borrow` describes
 module-allocated memory without copying it.
-The C ABI is 3.1; modules built against ABI 2 or earlier must be rebuilt for SONAME 3.
+The C ABI is 3.2; modules built against ABI 2 or earlier must be rebuilt for SONAME 3.
 Preparation, inference, `close()` and destruction run on the prepared device: core makes
 it current for the call and returns with the calling thread's current CUDA device and
 context unchanged, on success and on failure, even when the module selects its own device
@@ -262,6 +262,40 @@ when its entry is missing or was built for an incompatible core ABI. Creation ca
 called from several threads, and each call returns an independent model. To replace a
 running model, close and destroy the old model and create the new one.
 
+Named creation and family query share one resolver. An application that links module
+implementations into its executable can supply their descriptors once, before either
+named operation begins:
+
+```cpp
+pixtreme::infer::set_module_entries({pixtreme_infer_module_entry_my_architecture()});
+auto family = pixtreme::infer::Family::query_by_name("my_architecture", {
+    {"temporal", "true"}}); // module-specific settings that determine this family
+```
+
+In C, `pixtreme_infer_module_entries_set` accepts an array of descriptor pointers;
+`pixtreme_infer_family_query_by_name` returns an owned family, released with
+`pixtreme_infer_family_destroy`. The C++ `Family` owns the same handle. The family
+outlives models and other queries, retains symbolic H/W dimensions, and can be read
+before weights or input dimensions are known. Query does not create a model, allocate
+GPU memory, initialize CUDA or create a context. It requires the settings that determine
+the family; creation-only settings may be omitted, but supplied settings are still
+validated. Query success does not promise that creation or preparation will succeed.
+A module must provide query and model families from one declaration.
+
+List acceptance is atomic and ordered against the first named operation on every
+thread, including a failed operation. Invalid descriptors, absent/invalid names and
+duplicate names return `INVALID_ARGUMENT` with a distinct reason. A failed acceptance
+can be corrected before any named operation starts. A second acceptance, or acceptance
+after a named operation starts, returns `INVALID_STATE` and leaves the list unchanged.
+An empty list counts as the one successful acceptance. A different ABI major rejects
+the whole list with `INCOMPATIBLE_ABI` before its name or callbacks are read. For the
+same major, a missing name is an acceptance error; a newer minor or missing creation
+callback is recorded and reported when the name is used. Descriptor storage and names
+remain immutable and alive until process exit; the array itself is borrowed only for
+the call. Listed entries never fall back to a shared entry on ABI or callback failure.
+Unlisted names use the shared-library path below. The static-core build and its lookup
+behavior are implemented separately; this describes the shared core.
+
 A module distribution makes itself available by name with one entry library:
 
 - File: `pixtreme/infer/<name>/lib/libpixtreme_infer_<name>_entry.so` in the wheel. The
@@ -275,8 +309,13 @@ A module distribution makes itself available by name with one entry library:
   It returns a descriptor with static storage and does no CUDA, file or allocation work.
 - ABI: the descriptor carries the core ABI the module was built against
   (`PIXTREME_INFER_MODULE_ENTRY_INIT` fills `PIXTREME_INFER_ABI_MAJOR` and `_MINOR`) and
-  the module's creation function. The core calls that function only when the majors
-  are equal and the module's minor is not newer than the core's.
+  the module's creation function. ABI 3.2 appends the module name and a
+  `query_family` callback with the same options and an owned-family output. The core
+  calls callbacks only when the majors are equal and the module's minor is not newer
+  than the core's. Short older descriptors and entries without `query_family` still
+  support creation; query alone returns `INCOMPATIBLE_ABI`. Linked implementations
+  expose `pixtreme_infer_module_entry_<module>` with C linkage and return the same
+  descriptor shape. The application cannot assign a different name to an entry.
 - Lifetime: the core opens each name's entry library once per process and never closes
   it. Module state shared by instances must be thread-safe, and instances used on
   different threads must give the results each gives alone. A different module build
@@ -299,8 +338,11 @@ pixtreme_infer_status_t create(const pixtreme_infer_option_t *const *options, ui
 }
 extern "C" __attribute__((visibility("default")))
 const pixtreme_infer_module_entry_t *pixtreme_infer_module_entry(void) noexcept {
+    // A creation-only entry remains compatible; append name and query_family
+    // to support builtin selection and family queries.
     static const pixtreme_infer_module_entry_t entry = {
-        sizeof(pixtreme_infer_module_entry_t), PIXTREME_INFER_ABI_MAJOR, PIXTREME_INFER_ABI_MINOR, create};
+        sizeof(pixtreme_infer_module_entry_t), PIXTREME_INFER_ABI_MAJOR, PIXTREME_INFER_ABI_MINOR,
+        create, nullptr, nullptr};
     return &entry;
 }
 ```
