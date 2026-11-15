@@ -12,7 +12,7 @@ maintained and distributed separately as architecture distributions.
 
 ## Capabilities
 
-The base dependency is `pixtreme>=2.24.0`. Optional capabilities are separated by extra:
+The base dependency is `pixtreme>=2.25.3`. Optional capabilities are separated by extra:
 
 - `verify`: device telemetry for the shared verification tools.
 
@@ -47,20 +47,45 @@ that wheel, so run the first two commands again after `uv sync` and after changi
 Python or C++ source, and pass `--no-sync` to `uv run`.
 
 The C++ build takes its C and C++ dependencies from Conan with the recipe and lock in `cpp/`,
-including pixtreme's prebuilt C and C++ SDK and shared library and the CUDA runtime. For the
-pixtreme version that the lock records, the build downloads the recipe archive from
-[pixtreme's public GitHub Release](https://github.com/sync-dev-org/pixtreme/releases) without
-credentials, checks it against the Release's `SHA256SUMS`, and exports its recipes. The build
-needs the Conan CLI version that `python/pyproject.toml` pins. Build and test the standalone SDK
-from the repository root:
+including pixtreme's prebuilt C and C++ SDK and shared library and the CUDA runtime.
+The preparation script fetches missing recipes from the private
+`sync-dev-org/conan-recipes` Release using the host's `gh` login, verifies the archive
+and locked revisions, and obtains pixtreme's SDK from its public Release. It also
+obtains CMake and Ninja binaries from ConanCenter; their versions are declared once
+in `cpp/conan/profiles/tools`. The host needs Python 3.12 or newer, the compiler and
+the Conan CLI version pinned in `python/pyproject.toml`.
+
+Build and test the standalone SDK from the repository root:
 
 ```console
 uv tool install conan==2.34.0
-cmake -P cpp/conan/prepare-tests.cmake
-cmake -S cpp -B build/cpp -G Ninja
-cmake --build build/cpp
-ctest --test-dir build/cpp --output-on-failure
+python3 cpp/conan/prepare-tests.py --output build/conan-tests
+python3 cpp/conan/prepare.py --output build/cpp --tests --offline
+. ./build/cpp/conanbuild.sh
+cd cpp
+cmake --preset conan-release
+cmake --build --preset conan-release
+ctest --preset conan-release --output-on-failure
+cd ..
 ```
+
+Dependency preparation runs before CMake and stops on failure. Test builds use only
+prepared recipes and binaries. To select another compiler, pass `--host-profile` and
+`--build-profile`; the defaults are `linux-gcc-toolset-13` on Linux and
+`windows-msvc194` on Windows (Windows builds remain unverified). On Windows use cmd
+and `call build\cpp\conanbuild.bat` instead of sourcing the shell script.
+Use `CONAN_HOME` to choose the Conan home, or `--cache <absolute path>` to choose only
+the package storage; use the same values when preparing and building tests.
+
+Python build hooks use this same preparation, apply its complete build environment,
+and pass a private toolchain and build directory to scikit-build-core. They do not
+write C++ user presets. An sdist carries the locked shared recipe copies so its build
+needs no `gh` login. For a manylinux release wheel set
+`PIXTREME_INFER_CONAN_RELEASE=1`, which selects `linux-gcc-toolset-14` and builds the
+library dependencies in the image while requiring CMake and Ninja binaries.
+`PIXTREME_INFER_CONAN_PROFILE` and `PIXTREME_INFER_CONAN_BUILD_PROFILE` override the
+profiles, and `PIXTREME_INFER_CONAN_CACHE` selects an absolute package storage path.
+Use a writable `CONAN_HOME` and package storage under the container's build directory.
 
 No step compiles pixtreme: its Conan package unpacks the prebuilt SDK of the Release. The
 wheel never contains pixtreme: its library needs `libpixtreme.so.2` and finds it in the
@@ -155,8 +180,10 @@ To embed the core in a native library or application, build it from source with
 form of the core, and both forms use `pixtreme_infer::pixtreme_infer`:
 
 ```console
-cmake -P cpp/conan/prepare-tests.cmake
-cmake -S cpp -B build/static -G Ninja -DBUILD_SHARED_LIBS=OFF
+python3 cpp/conan/prepare-tests.py --output build/conan-tests
+python3 cpp/conan/prepare.py --output build/static --tests --offline --no-presets
+. ./build/static/conanbuild.sh
+cmake -S cpp -B build/static -G Ninja -DCMAKE_TOOLCHAIN_FILE="$PWD/build/static/conan_toolchain.cmake" -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF
 cmake --build build/static
 ctest --test-dir build/static --output-on-failure
 cmake --install build/static --prefix "$PWD/static-sdk"
