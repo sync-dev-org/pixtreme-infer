@@ -12,7 +12,7 @@ maintained and distributed separately as architecture distributions.
 
 ## Capabilities
 
-The base dependency is `pixtreme>=2.25.3`. Optional capabilities are separated by extra:
+The base dependency is `pixtreme>=2.27.5`. Optional capabilities are separated by extra:
 
 - `verify`: device telemetry for the shared verification tools.
 
@@ -201,8 +201,9 @@ core's build machine.
 One process uses one core. A statically embedded core resolves only the module entries
 supplied with `pixtreme_infer_module_entries_set`; an unlisted name returns
 `PIXTREME_INFER_MODULE_NOT_FOUND` without opening a shared module. The wheel and Release
-SDK archives contain the shared core, and wheel builds explicitly select it. The Conan
-recipe's static option is not yet available.
+SDK archives contain the shared core, and wheel builds explicitly select it. The shared
+Conan recipe builds the static core only from source (`from_source=True` with
+`shared=False`) and rejects a static request for the prebuilt SDK.
 
 ## Native inference lifecycle
 
@@ -256,6 +257,19 @@ a module linked into the executable shares the caller's CUDA runtime device stat
 
 `model.family_contract` exposes the same native family's Frame and parameter declarations.
 Python contract construction uses the native C validation as well.
+
+When both channel declarations are exact and neither contains `A`, core also accepts
+the declared input sequence followed by one `A`: RGB accepts RGBA, and BGR accepts BGRA.
+The module receives only its declared channels. Core appends the input alpha to the
+module result, using bilinear resize when dimensions change and converting alpha to
+the result's dtype, range and bit depth. The module's other pixels and color metadata
+stay unchanged. Core applies no extra clamp, color/gamma conversion or premultiplication
+to alpha. Integer representation conversion includes pixtreme's rounding and saturation;
+float results retain values outside [0,1].
+This rule is shared by normal and CUDA Graph inference; alpha does not enter auxiliary
+inputs or temporal state. Family queries and model contracts retain the module's
+declarations. All other input checks still apply, and other channel sequences and
+families retain their declared behavior.
 
 The native class interface requires architecture modules built for core 0.18 or later.
 Older modules exposing query/open factories are incompatible. Build modules against the
