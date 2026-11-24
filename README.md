@@ -12,7 +12,7 @@ maintained and distributed separately as architecture distributions.
 
 ## Capabilities
 
-The base dependency is `pixtreme>=2.27.5`. Optional capabilities are separated by extra:
+The base dependency is `pixtreme>=2.28.0`. Optional capabilities are separated by extra:
 
 - `verify`: device telemetry for the shared verification tools.
 
